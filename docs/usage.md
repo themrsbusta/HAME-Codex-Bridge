@@ -37,7 +37,11 @@ python src/bridge.py submit --url https://www.python.org/robots.txt --filename o
 
 `--notify-on` without values suppresses all callbacks. Policies are persisted with each task. Reusing a task ID with identical arguments and policy is idempotent; changing either is rejected.
 
-Callbacks go to `reply_to_thread_id` when the caller supplies the originating Codex thread and the App Server can resume it. Otherwise, they go to the dedicated bridge conversation. Another active writer or an exhausted Codex quota can block a callback. Each callback begins with the literal `*Mica*:` marker. It labels the source; it does not give the model a custom personality.
+Callbacks go to `reply_to_thread_id` when the caller supplies the target Codex thread and the App Server can resume it. The MCP host does not automatically include the calling conversation's thread ID in tool arguments. To reply in that same conversation, the caller must pass its ID in `reply_to_thread_id`. Otherwise, the callback goes to the dedicated bridge conversation; the initial tool response now reports `callback_target` and `same_conversation` so this fallback is visible immediately. Another active writer or an exhausted Codex quota can still block a callback. Each callback begins with the literal `*Mica*:` marker. It labels the source; it does not give the model a custom personality.
+
+For text analysis, `delegate_task` also accepts `"wait_for_result": true`. This waits up to about ten minutes and returns the final result as the MCP tool response in the requesting conversation, prefixed with `*Mica*:`. No Codex callback turn or conversation ID is needed, and callbacks are suppressed for this mode. Use it when the response needs to appear in the active conversation; use the asynchronous mode for work that should return later. If the wait times out, the queued task may still be running; inspect its local state before retrying with the same task ID.
+
+The Codex executable is resolved afresh before every App Server connection: `HAME_CODEX_EXECUTABLE` takes precedence, followed by the current `PATH`, then the last saved path if that file still exists. If Codex was moved or updated, restart the MCP host to refresh its environment. If `codex` is not on `PATH`, set `HAME_CODEX_EXECUTABLE` to the full path of the current executable in the MCP server environment. When no valid executable is found, the bridge clears its stale saved value and returns an actionable error instead of repeatedly launching a dead path.
 
 ## MCP integration
 
@@ -55,8 +59,7 @@ On Windows, quote absolute paths containing spaces. Restart/reload the client if
   "task": "Summarize the supplied notes and list open questions",
   "input_text": "Notes go here",
   "task_id": "analysis-001",
-  "notify_on": ["completed", "failed", "needs_attention"],
-  "reply_to_thread_id": "originating_codex_thread_id"
+  "wait_for_result": true
 }
 ```
 
@@ -72,6 +75,8 @@ Use `delegate_download` for HTTPS transfers:
 ```
 
 Optional callback fields for either tool: `notify_on`, `reply_to_thread_id`. Download options: `sha256`, `max_bytes`. Initialize the same state directory with `init` before using MCP. The target thread ID is persisted with the task and covered by task idempotency.
+
+Do not omit `reply_to_thread_id` when the result must return to the conversation that submitted the task. This bridge cannot infer that ID from standard MCP tool arguments. The tool response explicitly labels the dedicated-conversation fallback when no target ID was supplied.
 
 ## Persistence and recovery
 

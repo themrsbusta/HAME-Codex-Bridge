@@ -39,6 +39,29 @@ def dumps(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def codex_executable(store):
+    """Resolve the installed CLI on every connection so stale cached paths recover."""
+    candidates = [os.environ.get('HAME_CODEX_EXECUTABLE'), shutil.which('codex'), store.get('codex')]
+    checked = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        key = str(path).casefold()
+        if key in checked:
+            continue
+        checked.add(key)
+        if path.is_file():
+            resolved = str(path.resolve())
+            store.set('codex', resolved)
+            return resolved
+    store.set('codex', '')
+    raise FileNotFoundError(
+        'Codex CLI não encontrado. Atualize o PATH ou defina HAME_CODEX_EXECUTABLE '
+        'com o caminho atual do executável e reinicie o processo MCP do bridge.'
+    )
+
+
 class Store:
     def __init__(self, home):
         self.home = Path(home).resolve()
@@ -324,9 +347,7 @@ def initialize(store):
         if initialization == 'pending' or json.loads(initialization).get('status') != 'completed':
             raise RuntimeError('Inicialização anterior incompleta; conferir histórico antes de repetir')
         return {'thread_id': store.get('thread_id'), 'existing': True}
-    executable = shutil.which('codex')
-    if not executable:
-        raise ValueError('codex não encontrado no PATH')
+    executable = codex_executable(store)
     with RPC(executable) as rpc:
         response = rpc.call('thread/start', {
             'cwd': str(ROOT), 'sandbox': 'read-only', 'approvalPolicy': 'never',
@@ -352,7 +373,7 @@ def notify(store, task):
     # Transport setup/resume failures are safe to retry later. Once sending is recorded,
     # any ambiguous result is held for manual reconciliation, never replayed.
     target_thread = task.get('reply_to_thread_id') or task['thread_id']
-    with RPC(store.get('codex')) as rpc:
+    with RPC(codex_executable(store)) as rpc:
         rpc.call('thread/resume', {'threadId': target_thread, 'excludeTurns': True,
                                   'sandbox': 'read-only', 'approvalPolicy': 'never'})
         payload = {'task_id': task['id'], 'status': task['state'], 'evidence': task['result']}
@@ -373,7 +394,7 @@ def reconcile(store, task_id):
     task = store.task(task_id)
     target_thread = task.get('reply_to_thread_id') or task['thread_id']
     cursor = None
-    with RPC(store.get('codex')) as rpc:
+    with RPC(codex_executable(store)) as rpc:
         for _ in range(100):
             params = {'threadId': target_thread, 'itemsView': 'full', 'limit': 100}
             if cursor:
@@ -401,6 +422,17 @@ def reconcile(store, task_id):
             if not cursor:
                 break
     return {'task_id': task_id, 'found': False, 'action': 'No resend. Inspect history and transport before intervening.'}
+
+
+def wait_for_task(store, task_id, timeout=610):
+    """Return a local task result in the active MCP call without a callback turn."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task = store.task(task_id)
+        if task['state'] in {'completed', 'failed', 'needs_attention'}:
+            return task
+        time.sleep(.25)
+    raise TimeoutError('A tarefa continua em execução; consulte o estado local antes de reenviá-la')
 
 
 @contextlib.contextmanager
@@ -479,11 +511,13 @@ def start(store):
 
 def mcp(store):
     common = {'task_id': {'type': 'string'}, 'reply_to_thread_id': {'type': 'string',
-              'description': 'Optional originating Codex thread ID. When omitted, callback goes to the bridge thread.'},
+              'description': 'Codex thread ID for the conversation that should receive the callback. The MCP host does not expose the caller thread automatically; provide this ID to reply in the current conversation. When omitted, callback goes to the dedicated bridge conversation.'},
               'notify_on': {'type': 'array', 'items': {'type': 'string', 'enum': sorted(NOTIFIABLE)},
                             'description': 'Defaults to failed and needs_attention; add completed to receive success callbacks.'}}
-    analyze_tool = {'name': 'delegate_task', 'description': 'Delegate a general text analysis, summarization, classification or drafting task to the local HAME model. Persists asynchronously. Does not execute commands or modify files. For HTTPS transfers use delegate_download. Callback goes to the configured bridge conversation according to notify_on.',
-            'inputSchema': {'type': 'object', 'properties': {**common, 'kind': {'type': 'string', 'enum': ['analyze']},
+    analyze_tool = {'name': 'delegate_task', 'description': 'Delegate text analysis, summarization, classification or drafting to the local HAME model. Set wait_for_result=true to return the Mica result in this same conversation, prefixed with *Mica*:, without a callback turn or Codex thread ID. The wait is bounded to about ten minutes. Otherwise the task runs asynchronously and callbacks follow notify_on. Does not execute commands or modify files.',
+            'inputSchema': {'type': 'object', 'properties': {**common,
+                'wait_for_result': {'type': 'boolean', 'description': 'Wait for completion and return the result in this MCP call; text tasks only.'},
+                'kind': {'type': 'string', 'enum': ['analyze']},
                 'task': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
                 'input_text': {'type': 'string', 'maxLength': 200000}},
                 'required': ['task_id', 'kind', 'task'], 'additionalProperties': False}}
@@ -515,14 +549,34 @@ def mcp(store):
                 task_id = args.pop('task_id')
                 notify_on = args.pop('notify_on', None)
                 reply_to = args.pop('reply_to_thread_id', None)
+                wait_for_result = args.pop('wait_for_result', False)
+                if type(wait_for_result) is not bool:
+                    raise ValueError('wait_for_result must be a boolean')
                 if params['name'] == 'delegate_task':
                     args['kind'] = args.pop('kind', 'analyze')
+                    if wait_for_result:
+                        # The result is delivered in the active MCP call; a callback would be redundant.
+                        notify_on = []
                 else:
+                    if wait_for_result:
+                        raise ValueError('wait_for_result is available for text tasks only')
                     args['kind'] = 'download'
                 task = submit(store, args, task_id, notify_on, reply_to)
                 start(store)
+                if wait_for_result:
+                    task = wait_for_task(store, task['id'])
+                    result = {'content': [{'type': 'text', 'text': '*Mica*: '+dumps({
+                        'task_id': task['id'], 'state': task['state'], 'result': task['result'],
+                        'delivery': 'returned_in_originating_mcp_call'})}]}
+                    response = {'jsonrpc': '2.0', 'id': request_id, 'result': result}
+                    print(dumps(response), flush=True)
+                    continue
+                callback_target = task.get('reply_to_thread_id') or ''
                 result = {'content': [{'type': 'text', 'text': dumps({'task_id': task['id'], 'state': task['state'],
-                           'thread_id': task['thread_id'], 'note': 'Execução assíncrona solicitada; ainda não concluída.'})}]}
+                           'thread_id': task['thread_id'],
+                           'callback_target': 'originating_conversation' if callback_target else 'dedicated_bridge_conversation',
+                           'same_conversation': bool(callback_target),
+                           'note': 'Execução assíncrona solicitada; ainda não concluída.'})}]}
             else:
                 raise ValueError('Método desconhecido')
             response = {'jsonrpc': '2.0', 'id': request_id, 'result': result}
