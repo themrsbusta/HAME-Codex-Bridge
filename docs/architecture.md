@@ -2,6 +2,8 @@
 
 [Back to project](../README.md)
 
+The text task handler accepts summaries, classifications, drafting, and analysis requests. The download handler performs HTTPS transfers. Each result follows the task's notification policy. A supplied originating thread ID selects that conversation for the callback. Callback text uses the literal `*Mica*:` prefix as source attribution; it adds no persona instructions.
+
 ## How HAME and llama.cpp fit together
 
 ```text
@@ -18,7 +20,8 @@ HAME-Codex Bridge ---- SQLite queue and verified download executor
           v
       llama.cpp ---- GGUF model (CPU or compatible GPU backend)
 
-Selected results -> Codex App Server over local JSON-RPC/stdio
+Selected results -> originating Codex thread when configured; otherwise the bridge thread
+                    through Codex App Server over local JSON-RPC/stdio
 ```
 
 llama.cpp is the inference engine: it loads GGUF weights and generates model output using the selected CPU/GPU backend. HAME runs above that engine and manages persistent session history, context budgeting, retrieval and context compaction. It is not a replacement model or a replacement for llama.cpp.

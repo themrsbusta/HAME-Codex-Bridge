@@ -4,6 +4,8 @@
 
 Run commands from the repository root.
 
+The CLI entry point is `src/bridge.py`. MCP exposes `delegate_task` for text analysis, summarization, classification and drafting, and `delegate_download` for HTTPS transfers. Both share the queue and per-task callback selection. Arbitrary program execution and general file modification are not implemented.
+
 ## Run the bridge
 
 From the cloned repository:
@@ -35,7 +37,7 @@ python src/bridge.py submit --url https://www.python.org/robots.txt --filename o
 
 `--notify-on` without values suppresses all callbacks. Policies are persisted with each task. Reusing a task ID with identical arguments and policy is idempotent; changing either is rejected.
 
-Callbacks go to the dedicated bridge conversation, **not automatically to whichever desktop chat submitted the task**. The bridge owns a separate App Server process over stdio. Another active writer or an exhausted Codex quota can block a callback. Immediate display of the dedicated thread in the desktop application is not guaranteed.
+Callbacks go to `reply_to_thread_id` when the caller supplies the originating Codex thread and the App Server can resume it. Otherwise, they go to the dedicated bridge conversation. Another active writer or an exhausted Codex quota can block a callback. Each callback begins with the literal `*Mica*:` marker. It labels the source; it does not give the model a custom personality.
 
 ## MCP integration
 
@@ -45,7 +47,20 @@ Register with absolute paths appropriate for your installation:
 codex mcp add hame_bridge -- /absolute/path/to/python /absolute/path/to/src/bridge.py mcp
 ```
 
-On Windows, quote absolute paths containing spaces. Restart/reload the client if it already cached the tool catalog. The tool is `delegate_download`:
+On Windows, quote absolute paths containing spaces. Restart/reload the client if it already cached the tool catalog. Use `delegate_task` for text analysis:
+
+```json
+{
+  "kind": "analyze",
+  "task": "Summarize the supplied notes and list open questions",
+  "input_text": "Notes go here",
+  "task_id": "analysis-001",
+  "notify_on": ["completed", "failed", "needs_attention"],
+  "reply_to_thread_id": "originating_codex_thread_id"
+}
+```
+
+Use `delegate_download` for HTTPS transfers:
 
 ```json
 {
@@ -56,7 +71,7 @@ On Windows, quote absolute paths containing spaces. Restart/reload the client if
 }
 ```
 
-Optional arguments: `sha256`, `max_bytes`, `notify_on`. Initialize the same state directory with `init` before using MCP. Authorize the URL and destination before delegation; this tool downloads content and does not install software.
+Optional callback fields for either tool: `notify_on`, `reply_to_thread_id`. Download options: `sha256`, `max_bytes`. Initialize the same state directory with `init` before using MCP. The target thread ID is persisted with the task and covered by task idempotency.
 
 ## Persistence and recovery
 

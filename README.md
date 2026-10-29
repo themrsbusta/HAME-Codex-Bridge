@@ -30,7 +30,11 @@ python src/bridge.py submit --url https://www.python.org/robots.txt --filename r
 python src/bridge.py status example-001
 ```
 
-Python 3.11+ and an authenticated Codex CLI are required. No third-party Python packages are needed. Initialization creates a dedicated Codex conversation and can consume quota; successful routine downloads stay local by default.
+Python 3.11+ and an authenticated Codex CLI are required. No third-party Python packages are needed. Initialization creates a dedicated Codex conversation and can consume quota. Text analysis and downloads are supported task types; both stay local on success by default.
+
+`delegate_task` handles text analysis, summarization, classification, and drafting from the task and optional text supplied by the caller. `delegate_download` handles validated HTTPS transfers. Both share the queue, result storage, status and callback policy. The bridge does not execute arbitrary programs or modify arbitrary files; those actions require separately implemented task handlers.
+
+Callbacks can set `reply_to_thread_id` to the Codex thread that originated the task. The App Server must be able to resume that thread. If omitted, callbacks go to the bridge's dedicated conversation. Each callback message starts with the literal `*Mica*:` attribution marker and contains the task result; this does not change the analysis prompt or model personality.
 
 ## Documentation
 
@@ -44,6 +48,8 @@ Python 3.11+ and an authenticated Codex CLI are required. No third-party Python 
 ```powershell
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+Submit text analysis with `python src/bridge.py submit-task --task "Summarize these notes" --input-text "..." --task-id example-002`. The MCP tool `delegate_task` takes `kind: "analyze"`, `task`, optional `input_text`, and `task_id`.
 
 Tests run offline without models or Codex inference.
 
