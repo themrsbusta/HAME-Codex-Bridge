@@ -1,5 +1,8 @@
 # HAME-Codex Bridge
 
+**Division:** Panthera Research. **License:** [MIT](LICENSE).
+
+
 A small, local, source-only bridge between HAME and Codex App Server. It accepts authorized HTTPS download tasks, stores them in SQLite, runs them in an independent worker, and optionally reports results to a dedicated Codex conversation.
 
 Successful routine tasks stay local by default. Only failures and tasks needing attention trigger Codex. Queue monitoring uses conventional Python code, not continuous model inference. Initial conversation setup and requested callbacks can still use Codex quota; no fixed savings are guaranteed.
